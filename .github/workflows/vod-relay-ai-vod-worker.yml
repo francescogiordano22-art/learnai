@@ -1,6 +1,6 @@
 name: VOD Relay Free AI VOD Worker
 run-name: VOD Relay Worker
-# Private Production bundle rebuilt from current source – recovery v2
+# One-time recovery for the existing VOD Relay job
 
 on:
   workflow_dispatch:
@@ -37,7 +37,7 @@ jobs:
         id: lease
         env:
           API_BASE_URL: https://vod-relay.vercel.app
-          REQUESTED_JOB_ID: ${{ inputs.job_id }}
+          REQUESTED_JOB_ID: ${{ inputs.job_id || 'aivodjob_a7b536b1-a5d8-4652-be81-6ee058619395' }}
           OIDC_AUDIENCE: vod-relay-ai-vod-worker-v1
         run: |
           set -euo pipefail
