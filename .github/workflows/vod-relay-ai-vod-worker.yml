@@ -1,6 +1,6 @@
 name: VOD Relay Free AI VOD Worker
 run-name: VOD Relay Worker
-# Private Production bundle ready
+# Private Production bundle ready – analysis JSON v2
 
 on:
   workflow_dispatch:
