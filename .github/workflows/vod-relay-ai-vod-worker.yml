@@ -1,6 +1,6 @@
 name: VOD Relay Free AI VOD Worker
 run-name: VOD Relay Worker
-# Production recovery bridge active
+# Private Production bundle ready
 
 on:
   workflow_dispatch:
