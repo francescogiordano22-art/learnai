@@ -1,0 +1,139 @@
+name: VOD Relay Free AI VOD Worker
+run-name: VOD Relay Worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: Optional opaque VOD Relay job ID
+        required: false
+        type: string
+      api_base_url:
+        description: VOD Relay API base URL
+        required: false
+        default: https://vod-relay.vercel.app
+        type: string
+  schedule:
+    - cron: '*/5 * * * *'
+  push:
+    branches: [main]
+    paths: [.github/workflows/vod-relay-ai-vod-worker.yml]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: vod-relay-free-ai-vod-worker
+  cancel-in-progress: false
+
+jobs:
+  lease-analyze-render:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Kurzlebigen Auftrag sicher übernehmen
+        id: lease
+        env:
+          API_BASE_URL: https://vod-relay.vercel.app
+          REQUESTED_JOB_ID: ${{ inputs.job_id }}
+          OIDC_AUDIENCE: vod-relay-ai-vod-worker-v1
+        run: |
+          set -euo pipefail
+          oidc_response="$(curl --fail-with-body --silent --show-error --max-time 30 \
+            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${OIDC_AUDIENCE}")"
+          oidc_token="$(jq -er '.value' <<< "$oidc_response")"
+          lease_payload="$(jq -nc --arg oidcToken "$oidc_token" --arg jobId "${REQUESTED_JOB_ID:-}" \
+            '{oidcToken:$oidcToken} + (if $jobId == "" then {} else {jobId:$jobId} end)')"
+          lease="$(curl --fail-with-body --silent --show-error --max-time 45 \
+            -X POST -H 'Content-Type: application/json' -H 'Accept: application/json' \
+            --data-binary "$lease_payload" "$API_BASE_URL/api/internal/ai-vod-clipper/public-worker/lease")"
+          if [ "$(jq -r '.leased == true' <<< "$lease")" != true ]; then
+            echo 'leased=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          jq -er '.jobToken,.failureToken,.bundleToken' <<< "$lease" | while IFS= read -r secret; do echo "::add-mask::$secret"; done
+          install -m 600 /dev/null "$RUNNER_TEMP/vod-relay-lease.json"
+          printf '%s' "$lease" > "$RUNNER_TEMP/vod-relay-lease.json"
+          echo 'leased=true' >> "$GITHUB_OUTPUT"
+
+      - name: Privaten, versionierten Worker laden
+        if: steps.lease.outputs.leased == 'true'
+        env:
+          API_BASE_URL: https://vod-relay.vercel.app
+        run: |
+          set -euo pipefail
+          job_id="$(jq -er '.jobId' "$RUNNER_TEMP/vod-relay-lease.json")"
+          bundle_token="$(jq -er '.bundleToken' "$RUNNER_TEMP/vod-relay-lease.json")"
+          mkdir -p "$RUNNER_TEMP/vod-relay-worker"
+          curl --fail-with-body --silent --show-error --max-time 120 \
+            -H "Authorization: Bearer $bundle_token" \
+            "$API_BASE_URL/api/internal/ai-vod-clipper/public-worker/jobs/$job_id/bundle" \
+            -o "$RUNNER_TEMP/vod-relay-worker.tar.gz"
+          tar -xzf "$RUNNER_TEMP/vod-relay-worker.tar.gz" --strip-components=1 -C "$RUNNER_TEMP/vod-relay-worker"
+
+      - name: Node.js einrichten
+        if: steps.lease.outputs.leased == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Python einrichten
+        if: steps.lease.outputs.leased == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Medien- und Analysewerkzeuge installieren
+        if: steps.lease.outputs.leased == 'true'
+        working-directory: ${{ runner.temp }}/vod-relay-worker
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ffmpeg
+          python -m pip install --disable-pip-version-check --no-cache-dir --upgrade \
+            "yt-dlp[default,curl-cffi]==2026.6.9" faster-whisper==1.2.1 \
+            opencv-python-headless==4.12.0.88 numpy==2.2.6 \
+            bgutil-ytdlp-pot-provider==1.3.1 yt-dlp-getpot-wpc==1.1.2
+          git clone --depth 1 --branch 1.3.1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git "$HOME/bgutil-ytdlp-pot-provider"
+          npm --prefix "$HOME/bgutil-ytdlp-pot-provider/server" ci
+          (cd "$HOME/bgutil-ytdlp-pot-provider/server" && npx tsc)
+
+      - name: Auftrag analysieren und Clips rendern
+        if: steps.lease.outputs.leased == 'true'
+        id: worker
+        working-directory: ${{ runner.temp }}/vod-relay-worker
+        env:
+          API_BASE_URL: https://vod-relay.vercel.app
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          export JOB_ID="$(jq -er '.jobId' "$RUNNER_TEMP/vod-relay-lease.json")"
+          export JOB_TOKEN="$(jq -er '.jobToken' "$RUNNER_TEMP/vod-relay-lease.json")"
+          set +e
+          timeout --signal=TERM --kill-after=30s 350m node scripts/ai-vod-clipper-worker.mjs
+          worker_exit=$?
+          if [ "$worker_exit" -eq 124 ] || [ "$worker_exit" -eq 137 ]; then echo 'worker_timeout=true' >> "$GITHUB_OUTPUT"; fi
+          exit "$worker_exit"
+
+      - name: Vorstart- oder Runnerfehler melden
+        if: failure() && steps.lease.outputs.leased == 'true'
+        env:
+          API_BASE_URL: https://vod-relay.vercel.app
+          FAILURE_CODE: ${{ steps.worker.outputs.worker_timeout == 'true' && 'worker_timeout' || 'worker_bootstrap_failed' }}
+        run: |
+          set -euo pipefail
+          job_id="$(jq -er '.jobId' "$RUNNER_TEMP/vod-relay-lease.json")"
+          failure_token="$(jq -er '.failureToken' "$RUNNER_TEMP/vod-relay-lease.json")"
+          curl --silent --show-error --max-time 30 -X POST \
+            -H "Authorization: Bearer $failure_token" \
+            -H "X-AI-VOD-Failure-Code: $FAILURE_CODE" \
+            "$API_BASE_URL/api/internal/ai-vod-clipper/jobs/$job_id/bootstrap-fail" >/dev/null || true
+
+      - name: Temporäre Dateien entfernen
+        if: always()
+        run: |
+          find "$RUNNER_TEMP" -maxdepth 1 -type d -name 'vod-relay-ai-vod-*' -exec rm -rf -- {} +
+          rm -rf -- "$RUNNER_TEMP/vod-relay-worker" "$RUNNER_TEMP/vod-relay-worker.tar.gz" "$RUNNER_TEMP/vod-relay-lease.json"
