@@ -126,6 +126,10 @@ jobs:
           FAILURE_CODE: ${{ steps.worker.outputs.worker_timeout == 'true' && 'worker_timeout' || 'worker_bootstrap_failed' }}
         run: |
           set -euo pipefail
+          if [ -f "$RUNNER_TEMP/vod-relay-worker-failure-reported" ]; then
+            echo "Canonical worker failure was already reported; bootstrap fallback is skipped."
+            exit 0
+          fi
           job_id="$(jq -er '.jobId' "$RUNNER_TEMP/vod-relay-lease.json")"
           failure_token="$(jq -er '.failureToken' "$RUNNER_TEMP/vod-relay-lease.json")"
           curl --silent --show-error --max-time 30 -X POST \
@@ -137,4 +141,4 @@ jobs:
         if: always()
         run: |
           find "$RUNNER_TEMP" -maxdepth 1 -type d -name 'vod-relay-ai-vod-*' -exec rm -rf -- {} +
-          rm -rf -- "$RUNNER_TEMP/vod-relay-worker" "$RUNNER_TEMP/vod-relay-worker.tar.gz" "$RUNNER_TEMP/vod-relay-lease.json"
+          rm -rf -- "$RUNNER_TEMP/vod-relay-worker" "$RUNNER_TEMP/vod-relay-worker.tar.gz" "$RUNNER_TEMP/vod-relay-lease.json" "$RUNNER_TEMP/vod-relay-worker-failure-reported"
