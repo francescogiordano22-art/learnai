@@ -113,8 +113,13 @@ jobs:
           set -euo pipefail
           export JOB_ID="$(jq -er '.jobId' "$RUNNER_TEMP/vod-relay-lease.json")"
           export JOB_TOKEN="$(jq -er '.jobToken' "$RUNNER_TEMP/vod-relay-lease.json")"
+          job_type="$(jq -r '.jobType // "ai_vod"' "$RUNNER_TEMP/vod-relay-lease.json")"
           set +e
-          timeout --signal=TERM --kill-after=30s 350m node scripts/ai-vod-clipper-worker.mjs
+          if [ "$job_type" = "clip_editor" ]; then
+            timeout --signal=TERM --kill-after=30s 350m node scripts/clip-editor-worker.mjs
+          else
+            timeout --signal=TERM --kill-after=30s 350m node scripts/ai-vod-clipper-worker.mjs
+          fi
           worker_exit=$?
           if [ "$worker_exit" -eq 124 ] || [ "$worker_exit" -eq 137 ]; then echo 'worker_timeout=true' >> "$GITHUB_OUTPUT"; fi
           exit "$worker_exit"
@@ -131,11 +136,14 @@ jobs:
             exit 0
           fi
           job_id="$(jq -er '.jobId' "$RUNNER_TEMP/vod-relay-lease.json")"
+          job_type="$(jq -r '.jobType // "ai_vod"' "$RUNNER_TEMP/vod-relay-lease.json")"
           failure_token="$(jq -er '.failureToken' "$RUNNER_TEMP/vod-relay-lease.json")"
+          failure_path="/api/internal/ai-vod-clipper/jobs/$job_id/bootstrap-fail"
+          if [ "$job_type" = "clip_editor" ]; then failure_path="/api/internal/clip-editor/exports/$job_id/fail"; fi
           curl --silent --show-error --max-time 30 -X POST \
             -H "Authorization: Bearer $failure_token" \
             -H "X-AI-VOD-Failure-Code: $FAILURE_CODE" \
-            "$API_BASE_URL/api/internal/ai-vod-clipper/jobs/$job_id/bootstrap-fail" >/dev/null || true
+            "$API_BASE_URL$failure_path" >/dev/null || true
 
       - name: Temporäre Dateien entfernen
         if: always()
