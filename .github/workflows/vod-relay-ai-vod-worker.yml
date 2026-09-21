@@ -47,9 +47,20 @@ jobs:
           oidc_token="$(jq -er '.value' <<< "$oidc_response")"
           lease_payload="$(jq -nc --arg oidcToken "$oidc_token" --arg jobId "${REQUESTED_JOB_ID:-}" \
             '{oidcToken:$oidcToken} + (if $jobId == "" then {} else {jobId:$jobId} end)')"
-          lease="$(curl --fail-with-body --silent --show-error --retry 5 --retry-delay 3 --retry-all-errors --retry-max-time 120 --max-time 45 \
+          lease_response="$RUNNER_TEMP/vod-relay-lease-response.json"
+          set +e
+          lease_http_status="$(curl --fail-with-body --silent --show-error --retry 5 --retry-delay 3 --retry-all-errors --retry-max-time 120 --max-time 45 \
             -X POST -H 'Content-Type: application/json' -H 'Accept: application/json' \
+            --output "$lease_response" --write-out '%{http_code}' \
             --data-binary "$lease_payload" "$API_BASE_URL/api/internal/ai-vod-clipper/public-worker/lease")"
+          lease_exit=$?
+          set -e
+          if [ "$lease_exit" -ne 0 ]; then
+            safe_error="$(jq -c '{error:(.error // "Lease fehlgeschlagen"),code:(.code // "worker_lease_failed")}' "$lease_response" 2>/dev/null || printf '%s' '{"error":"Lease fehlgeschlagen","code":"worker_lease_failed"}')"
+            echo "Lease request failed (HTTP ${lease_http_status:-000}): $safe_error" >&2
+            exit "$lease_exit"
+          fi
+          lease="$(<"$lease_response")"
           if [ "$(jq -r '.leased == true' <<< "$lease")" != true ]; then
             echo 'leased=false' >> "$GITHUB_OUTPUT"
             exit 0
@@ -171,4 +182,4 @@ jobs:
         if: always()
         run: |
           find "$RUNNER_TEMP" -maxdepth 1 -type d -name 'vod-relay-ai-vod-*' -exec rm -rf -- {} +
-          rm -rf -- "$RUNNER_TEMP/vod-relay-worker" "$RUNNER_TEMP/vod-relay-worker.tar.gz" "$RUNNER_TEMP/vod-relay-lease.json" "$RUNNER_TEMP/vod-relay-worker-failure-reported"
+          rm -rf -- "$RUNNER_TEMP/vod-relay-worker" "$RUNNER_TEMP/vod-relay-worker.tar.gz" "$RUNNER_TEMP/vod-relay-lease.json" "$RUNNER_TEMP/vod-relay-lease-response.json" "$RUNNER_TEMP/vod-relay-worker-failure-reported"
