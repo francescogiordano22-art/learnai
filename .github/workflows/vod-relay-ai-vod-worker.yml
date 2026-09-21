@@ -47,7 +47,7 @@ jobs:
           oidc_token="$(jq -er '.value' <<< "$oidc_response")"
           lease_payload="$(jq -nc --arg oidcToken "$oidc_token" --arg jobId "${REQUESTED_JOB_ID:-}" \
             '{oidcToken:$oidcToken} + (if $jobId == "" then {} else {jobId:$jobId} end)')"
-          lease="$(curl --fail-with-body --silent --show-error --max-time 45 \
+          lease="$(curl --fail-with-body --silent --show-error --retry 5 --retry-delay 3 --retry-all-errors --retry-max-time 120 --max-time 45 \
             -X POST -H 'Content-Type: application/json' -H 'Accept: application/json' \
             --data-binary "$lease_payload" "$API_BASE_URL/api/internal/ai-vod-clipper/public-worker/lease")"
           if [ "$(jq -r '.leased == true' <<< "$lease")" != true ]; then
@@ -162,10 +162,10 @@ jobs:
           failure_token="$(jq -er '.failureToken' "$RUNNER_TEMP/vod-relay-lease.json")"
           failure_path="/api/internal/ai-vod-clipper/jobs/$job_id/bootstrap-fail"
           if [ "$job_type" = "clip_editor" ]; then failure_path="/api/internal/clip-editor/exports/$job_id/fail"; fi
-          curl --silent --show-error --max-time 30 -X POST \
+          curl --fail-with-body --silent --show-error --retry 6 --retry-delay 5 --retry-all-errors --retry-max-time 180 --max-time 30 -X POST \
             -H "Authorization: Bearer $failure_token" \
             -H "X-AI-VOD-Failure-Code: $FAILURE_CODE" \
-            "$API_BASE_URL$failure_path" >/dev/null || true
+            "$API_BASE_URL$failure_path" >/dev/null
 
       - name: Temporäre Dateien entfernen
         if: always()
